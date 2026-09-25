@@ -9,11 +9,14 @@ from aiohttp import web
 # ==============================================================================
 # НАЛАШТУВАННЯ БОТА
 # ==============================================================================
-TELEGRAM_BOT_TOKEN = "ТВІЙ_TELEGRAM_BOT_TOKEN"
-TELEGRAM_CHAT_ID = "ТВІЙ_CHAT_ID"
+TELEGRAM_BOT_TOKEN = "8919783780:AAG3ScU7jUwFAyaF7hWfHINMCQrxqyYq2g0"
+TELEGRAM_CHAT_ID = "498333100"
 MIN_TRADE_USD = 250000  # Поріг $250,000 для топ-альткоїнів
-SYMBOLS = ["XRPUSDT", "SUIUSDT", "DOGEUSDT"]
+SYMBOLS = ["XRPUSDT", "SOLUSDT", "SUIUSDT", "DOGEUSDT"]
+
+# URL-адреси WebSocket для обох бірж
 BYBIT_WS_URL = "wss://stream.bybit.com/v5/public/linear"
+BINANCE_WS_URL = "wss://fstream.binance.com/stream?streams=" + "/".join([f"{s.lower()}@aggTrade" for s in SYMBOLS])
 
 # ==============================================================================
 # НАЛАШТУВАННЯ ЛОГУВАННЯ
@@ -24,11 +27,13 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 
-async def send_telegram_alert(session: aiohttp.ClientSession, symbol: str, side: str, price: float, volume: float, usd_val: float):
+# Універсальна функція відправки сповіщень у Telegram
+async def send_telegram_alert(session: aiohttp.ClientSession, exchange: str, symbol: str, side: str, price: float, volume: float, usd_val: float):
     emoji = "🟢 BUY (ПОКУПКА)" if side == "Buy" else "🔴 SELL (ПРОДАЖ)"
     
     message = (
-        f"🐋 **КИТІВСЬКА УГОДА НА BYBIT**\n\n"
+        f"🐋 **КИТІВСЬКА УГОДА НА {exchange.upper()}**\n\n"
+        f"🏦 **Біржа:** {exchange}\n"
         f"📌 **Торгова пара:** #{symbol}\n"
         f"📊 **Напрямок:** {emoji}\n"
         f"💵 **Ціна:** `{price:,.4f} USDT`\n"
@@ -49,11 +54,12 @@ async def send_telegram_alert(session: aiohttp.ClientSession, symbol: str, side:
                 text = await resp.text()
                 logging.error(f"Помилка Telegram API [{resp.status}]: {text}")
             else:
-                logging.info(f"Сповіщення надіслано: {symbol} | {side} | ${usd_val:,.2f}")
+                logging.info(f"[{exchange}] Сповіщення надіслано: {symbol} | {side} | ${usd_val:,.2f}")
     except Exception as e:
         logging.error(f"Не вдалося надіслати повідомлення у Telegram: {e}")
 
-async def ping(ws):
+# --- МОНІТОРИНГ BYBIT ---
+async def ping_bybit(ws):
     while True:
         try:
             await asyncio.sleep(20)
@@ -61,7 +67,7 @@ async def ping(ws):
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logging.warning(f"Помилка відправки Ping: {e}")
+            logging.warning(f"Помилка відправки Ping на Bybit: {e}")
             break
 
 async def monitor_bybit_whales():
@@ -71,12 +77,12 @@ async def monitor_bybit_whales():
     async with aiohttp.ClientSession() as session:
         while True:
             try:
-                logging.info(f"Підключення до Bybit WebSocket: {BYBIT_WS_URL}...")
+                logging.info(f"Підключення до Bybit WebSocket...")
                 async with websockets.connect(BYBIT_WS_URL, ping_interval=None) as ws:
                     await ws.send(json.dumps(subscribe_msg))
-                    logging.info(f"Успішно підписано на пари: {', '.join(SYMBOLS)}")
+                    logging.info(f"Успішно підписано на Bybit пари: {', '.join(SYMBOLS)}")
 
-                    ping_task = asyncio.create_task(ping(ws))
+                    ping_task = asyncio.create_task(ping_bybit(ws))
 
                     try:
                         while True:
@@ -93,22 +99,57 @@ async def monitor_bybit_whales():
 
                                     if usd_val >= MIN_TRADE_USD:
                                         await send_telegram_alert(
-                                            session, symbol, side, price, volume, usd_val
+                                            session, "Bybit", symbol, side, price, volume, usd_val
                                         )
 
                     finally:
                         ping_task.cancel()
 
             except (websockets.ConnectionClosed, websockets.WebSocketException, OSError) as e:
-                logging.error(f"З'єднання втрачено: {e}. Повторна спроба через 5 секунд...")
+                logging.error(f"Bybit: з'єднання втрачено: {e}. Повторна спроба через 5 сек...")
                 await asyncio.sleep(5)
             except Exception as e:
-                logging.error(f"Несподівана помилка: {e}. Повторна спроба через 5 секунд...")
+                logging.error(f"Bybit: несподівана помилка: {e}. Повторна спроба через 5 сек...")
                 await asyncio.sleep(5)
 
-# Сервер для відповіді Render
+# --- МОНІТОРИНГ BINANCE ---
+async def monitor_binance_whales():
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                logging.info(f"Підключення до Binance WebSocket...")
+                async with websockets.connect(BINANCE_WS_URL, ping_interval=20) as ws:
+                    logging.info(f"Успішно підписано на Binance пари: {', '.join(SYMBOLS)}")
+
+                    while True:
+                        response = await ws.recv()
+                        msg = json.loads(response)
+
+                        if "data" in msg:
+                            trade = msg["data"]
+                            symbol = trade["s"]
+                            price = float(trade["p"])
+                            volume = float(trade["q"])
+                            usd_val = price * volume
+
+                            # Для Binance: m = True означає, що покупцем був мейкер (тобто агресивна продажа)
+                            side = "Sell" if trade["m"] else "Buy"
+
+                            if usd_val >= MIN_TRADE_USD:
+                                await send_telegram_alert(
+                                    session, "Binance", symbol, side, price, volume, usd_val
+                                )
+
+            except (websockets.ConnectionClosed, websockets.WebSocketException, OSError) as e:
+                logging.error(f"Binance: з'єднання втрачено: {e}. Повторна спроба через 5 сек...")
+                await asyncio.sleep(5)
+            except Exception as e:
+                logging.error(f"Binance: несподівана помилка: {e}. Повторна спроба через 5 сек...")
+                await asyncio.sleep(5)
+
+# --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
 async def handle(request):
-    return web.Response(text="Bybit Whale Bot is alive!")
+    return web.Response(text="Crypto Whale Bot (Bybit + Binance) is alive!")
 
 async def main():
     port = int(os.environ.get("PORT", 8080))
@@ -121,7 +162,12 @@ async def main():
     await site.start()
     
     logging.info(f"Веб-сервер запущено на порту {port}")
-    await monitor_bybit_whales()
+    
+    # Запускаємо моніторинг двох бірж паралельно
+    await asyncio.gather(
+        monitor_bybit_whales(),
+        monitor_binance_whales()
+    )
 
 if __name__ == "__main__":
     try:
