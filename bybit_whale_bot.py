@@ -12,7 +12,7 @@ from aiohttp import web
 TELEGRAM_BOT_TOKEN = "8919783780:AAG3ScU7jUwFAyaF7hWfHINMCQrxqyYq2g0"
 TELEGRAM_CHAT_ID = "498333100"
 MIN_TRADE_USD = 250000  # Поріг $250,000 для топ-альткоїнів
-SYMBOLS = ["XRPUSDT",  "SUIUSDT", "DOGEUSDT"]
+SYMBOLS = ["XRPUSDT", "SUIUSDT", "DOGEUSDT"]
 
 # URL-адреси WebSocket для обох бірж
 BYBIT_WS_URL = "wss://stream.bybit.com/v5/public/linear"
